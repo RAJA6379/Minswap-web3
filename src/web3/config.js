@@ -11,3 +11,11 @@ export const CONTRACTS = {
   swap: '0xA8960c304b785191eD6cf949B8867e7d217cdD5F'
   
 };
+// src/web3/config.js
+
+export const SEPOLIA_CHAIN_ID = 11155111;
+
+export const SEPOLIA_USDC_ADDRESS =
+  "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+
+export const USDC_DECIMALS = 6;
