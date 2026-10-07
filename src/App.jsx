@@ -110,6 +110,12 @@ async function handleSwap() {
     setConnecting(false);
   }
 }
+  async function handleConnect(){
+    setError(''); setConnecting(true);
+    try { setAccount(await connectMetaMask()); }
+    catch(e){ setError(e?.message || 'Wallet connection failed'); }
+    finally { setConnecting(false); }
+  }
 
   function swapTokens(){ const old=from; setFrom(to); setTo(old); }
 
@@ -118,6 +124,7 @@ async function handleSwap() {
       <div className="brand"><img src="/assets/minswap-logo.svg"/><span>MinSwap</span></div>
       <nav><button>Swap</button><button>Liquidity</button><button>Earn</button></nav>
       <button className="connect" onClick={account ? handleDisconnect : handleConnect} disabled={connecting}>{connecting?'Connecting...':account?shortAddress(account.address):'Connect Wallet'}</button>
+      <button className="connect" onClick={handleConnect} disabled={connecting}>{connecting?'Connecting...':account?shortAddress(account.address):'Connect Wallet'}</button>
     </header>
 
     <main className="main">
@@ -147,6 +154,7 @@ async function handleSwap() {
     ? "Swap"
     : "Connect Wallet"}
 </button>
+        <button className="swap-button" onClick={account?()=>setError('Swap contract is not deployed yet. Deploy the provided Solidity contracts, then add the address in src/web3/config.js.'):handleConnect}>{account?'Swap':'Connect Wallet'}</button>
         <div className="network"><span className="dot"></span> Testnet • Sepolia ready</div>
       </section>
       <p className="notice">Demo UI based on the supplied Minswap-style template. Blockchain execution is intentionally separated so the UI can be connected to your own Solidity contracts.</p>
