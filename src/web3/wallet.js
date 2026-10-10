@@ -1,7 +1,7 @@
 
 import { BrowserProvider, formatEther } from "ethers";
 
-// Discover wallets using EIP-6963.
+// Discover available wallets
 export async function discoverWallets() {
   const found = new Map();
 
@@ -38,7 +38,6 @@ export async function discoverWallets() {
 
   const wallets = [...found.values()];
 
-  // Support older extensions as a fallback.
   const injected = window.ethereum;
 
   const legacy = Array.isArray(injected?.providers)
@@ -47,7 +46,6 @@ export async function discoverWallets() {
       ? [injected]
       : [];
 
-  // Only use legacy fallback if EIP-6963 found none.
   for (const provider of (wallets.length ? [] : legacy)) {
     if (
       !provider?.request ||
@@ -75,21 +73,24 @@ export async function discoverWallets() {
   return wallets;
 }
 
-// Connect to the exact wallet selected by the user.
-export async function connectWallet(wallet) {
+// Connect normally or restore an authorized connection
+export async function connectWallet(
+  wallet,
+  { silent = false } = {}
+) {
   if (!wallet?.provider?.request) {
     throw new Error("Select an available wallet.");
   }
 
   try {
     const accounts = await wallet.provider.request({
-      method: "eth_requestAccounts",
+      method: silent
+        ? "eth_accounts"
+        : "eth_requestAccounts",
     });
 
     if (!accounts?.[0]) {
-      throw new Error(
-        "No wallet account was selected."
-      );
+      throw new Error("No wallet account was selected.");
     }
 
     const provider = new BrowserProvider(
@@ -124,12 +125,12 @@ export async function connectWallet(wallet) {
       error?.shortMessage ||
       error?.info?.error?.message ||
       error?.message ||
-      "Unable to connect wallet. Unlock or restart the wallet extension and try again."
+      "Unable to connect wallet."
     );
   }
 }
 
-// Short display address.
+// Display shortened wallet address
 export function shortAddress(address) {
   return address
     ? `${address.slice(0, 6)}...${address.slice(-4)}`

@@ -1,459 +1,1274 @@
+
 import { useEffect, useRef, useState } from "react";
-import { BrowserProvider, Contract, formatEther, formatUnits } from "ethers";
-import { connectWallet, discoverWallets, shortAddress } from "./web3/wallet";
+import {
+  BrowserProvider,
+  Contract,
+  formatEther,
+  formatUnits,
+} from "ethers";
+
+import {
+  connectWallet,
+  discoverWallets,
+  shortAddress,
+} from "./web3/wallet";
+
 import { executeSwap } from "./web3/swap";
 import { NETWORK } from "./web3/config";
-import { EVM_NETWORKS, getNetworkInfo, switchEvmNetwork } from "./web3/networks";
+
+import {
+  EVM_NETWORKS,
+  getNetworkInfo,
+  switchEvmNetwork,
+} from "./web3/networks";
+
+import {
+  connectPhantomSolana,
+  getSolBalance,
+} from "./web3/solana/SolanaWallet";
 
 const tokens = {
   ETH: { symbol: "ETH", icon: "◆" },
+  SOL: { symbol: "SOL", icon: "◎" },
   USDC: { symbol: "USDC", icon: "$" },
   USDT: { symbol: "USDT", icon: "₮" },
 };
 
-const ERC20_ABI = ["function balanceOf(address) view returns (uint256)"];
+const ERC20_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+];
 
-function TokenSelect({ value, onChange, exclude }) {
+const STORAGE_KEY = "minswap:selected-wallet";
+
+// TOKEN SELECTOR
+function TokenSelect({
+  value,
+  onChange,
+  exclude,
+  solanaActive = false,
+  receive = false,
+}) {
+  if (solanaActive && !receive) {
+    return (
+      <select
+        className="token-select"
+        value="SOL"
+        disabled
+      >
+        <option value="SOL">◎ SOL</option>
+      </select>
+    );
+  }
+
+  if (solanaActive && receive) {
+    return (
+      <select
+        className="token-select"
+        value="none"
+        disabled
+      >
+        <option value="none">Select token</option>
+      </select>
+    );
+  }
+
   return (
-    <select className="token-select" value={value} onChange={(e) => onChange(e.target.value)}>
-      {Object.keys(tokens).filter((k) => k !== exclude).map((k) => (
-        <option key={k} value={k}>{tokens[k].icon} {k}</option>
-      ))}
+    <select
+      className="token-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      {["ETH", "USDC", "USDT"]
+        .filter((symbol) => symbol !== exclude)
+        .map((symbol) => (
+          <option key={symbol} value={symbol}>
+            {tokens[symbol].icon} {symbol}
+          </option>
+        ))}
     </select>
   );
 }
 
+// WALLET LOGO
 function WalletLogo({ icon, name, size = 24 }) {
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [icon]);
+
   if (icon && !failed) {
     return (
-      <img src={icon} alt={name || "Wallet"} className="connected-wallet-logo"
-        style={{ width: size, height: size }} onError={() => setFailed(true)} />
+      <img
+        src={icon}
+        alt={name || "Wallet"}
+        className="connected-wallet-logo"
+        style={{ width: size, height: size }}
+        onError={() => setFailed(true)}
+      />
     );
   }
-  return <span className="wallet-logo-fallback" style={{ width: size, height: size }}>{(name || "W")[0]}</span>;
-}
 
-// Real chain logo, falls back to the glyph if the image cannot load.
-function NetIcon({ net }) {
-  const [failed, setFailed] = useState(false);
-  const showLogo = net.logo && !failed;
   return (
-    <span className={`network-icon ${showLogo ? "has-logo" : ""}`} style={{ background: net.color }}>
-      {showLogo
-        ? <img className="net-img" src={net.logo} alt={net.name} onError={() => setFailed(true)} />
-        : net.icon}
+    <span
+      className="wallet-logo-fallback"
+      style={{ width: size, height: size }}
+    >
+      {(name || "W")[0]}
     </span>
   );
 }
 
-// SVG chevron (the old "⌄" text glyph is missing from the font and rendered as "v").
+// NETWORK LOGO
+function NetIcon({ net }) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [net?.logo]);
+
+  if (!net) return null;
+
+  return (
+    <span
+      className={`network-icon ${
+        net.logo && !failed ? "has-logo" : ""
+      }`}
+      style={{ background: net.color }}
+    >
+      {net.logo && !failed ? (
+        <img
+          className="net-img"
+          src={net.logo}
+          alt={net.name}
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        net.icon
+      )}
+    </span>
+  );
+}
+
+// DROPDOWN ARROW
 function Chevron({ open }) {
   return (
-    <svg className={`chev ${open ? "open" : ""}`} width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path d="M5 7.5l5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <svg
+      className={`chev ${open ? "open" : ""}`}
+      width="14"
+      height="14"
+      viewBox="0 0 20 20"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M5 7.5l5 5 5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
 
-// Collect wallet icons announced by every installed extension (EIP-6963).
-function useAnnouncedWallets() {
-  const [list, setList] = useState([]);
-  useEffect(() => {
-    const onAnnounce = (e) => {
-      const d = e.detail;
-      if (!d?.info) return;
-      setList((prev) => (prev.some((w) => w.info.uuid === d.info.uuid) ? prev : [...prev, d]));
-    };
-    window.addEventListener("eip6963:announceProvider", onAnnounce);
-    window.dispatchEvent(new Event("eip6963:requestProvider"));
-    return () => window.removeEventListener("eip6963:announceProvider", onAnnounce);
-  }, []);
-  return list;
+const chainsKey = (name) =>
+  `minswap-wallet-chains:${name}`;
+
+function loadChains(name) {
+  try {
+    return JSON.parse(
+      localStorage.getItem(chainsKey(name)) || "[]"
+    );
+  } catch {
+    return [];
+  }
 }
 
-// Networks this wallet has actually been seen on (remembered per wallet).
-const chainsKey = (walletName) => `minswap-wallet-chains:${walletName}`;
-function loadChains(walletName) {
-  try { return JSON.parse(localStorage.getItem(chainsKey(walletName)) || "[]"); } catch { return []; }
-}
-function saveChains(walletName, ids) {
-  try { localStorage.setItem(chainsKey(walletName), JSON.stringify(ids)); } catch { /* ignore */ }
+function saveChains(name, chains) {
+  try {
+    localStorage.setItem(
+      chainsKey(name),
+      JSON.stringify(chains)
+    );
+  } catch {
+    // Browser storage may be unavailable
+  }
 }
 
-const labelKey = (address) => `minswap-account-label:${address.toLowerCase()}`;
-function getLabel(address, index) {
-  try { return localStorage.getItem(labelKey(address)) || `Account ${index + 1}`; }
-  catch { return `Account ${index + 1}`; }
+const labelKey = (address) =>
+  `minswap-account-label:${address.toLowerCase()}`;
+
+function getLabel(address, index = 0) {
+  try {
+    return (
+      localStorage.getItem(labelKey(address)) ||
+      `Account ${index + 1}`
+    );
+  } catch {
+    return `Account ${index + 1}`;
+  }
 }
 
 export default function App() {
+  // WALLET STATE
   const [account, setAccount] = useState(null);
-  const [accounts, setAccounts] = useState([]);   // every address the wallet shared
-  const [balances, setBalances] = useState({});   // native balance per address
-  const [btc, setBtc] = useState(null);           // wrapped-BTC balance of active account
+  const [accounts, setAccounts] = useState([]);
+  const [balances, setBalances] = useState({});
+  const [btc, setBtc] = useState(null);
   const [error, setError] = useState("");
 
+  // SWAP STATE
   const [from, setFrom] = useState("ETH");
   const [to, setTo] = useState("USDC");
   const [amount, setAmount] = useState("");
   const [slippage, setSlippage] = useState("0.5");
   const [connecting, setConnecting] = useState(false);
 
+  // MODAL STATE
   const [walletOptions, setWalletOptions] = useState([]);
   const [walletModal, setWalletModal] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [walletMenuOpen, setWalletMenuOpen] = useState(false);
 
+  // ACCOUNT UI
   const [walletIcon, setWalletIcon] = useState(null);
   const [draftLabel, setDraftLabel] = useState("");
   const [editingLabel, setEditingLabel] = useState(false);
-  const [, setLabelTick] = useState(0);
+  const [labelTick, setLabelTick] = useState(0);
   const [copyMessage, setCopyMessage] = useState("");
 
-  const [walletChains, setWalletChains] = useState([]); // chain ids seen on this wallet
+  // NETWORKS
+  const [walletChains, setWalletChains] = useState([]);
   const [showMore, setShowMore] = useState(false);
-  const [showAllNets, setShowAllNets] = useState(null); // null = automatic
-  const [nonEvm, setNonEvm] = useState(null);       // "bitcoin" | "solana" | null (Phantom only)
-  const [otherAddrs, setOtherAddrs] = useState({}); // addresses of non-EVM networks
-  const announced = useAnnouncedWallets();
+  const [showAllNets, setShowAllNets] = useState(null);
+  const [nonEvm, setNonEvm] = useState(null);
+  const [otherAddrs, setOtherAddrs] = useState({});
+
+  // SOLANA DEVNET
+  const [solBalance, setSolBalance] = useState(null);
+
+  const solanaActive = nonEvm === "solana";
+
+  // REFERENCES
   const selectedWalletRef = useRef(null);
   const selectedWalletName = useRef("");
-  const network = getNetworkInfo(account?.chainId);
-  // MetaMask can use any network, so list them all; other wallets (e.g. Phantom) only show networks seen on them.
-  const showAll = showAllNets ?? /metamask/i.test(account?.walletName || "");
-  const isPhantom = /phantom/i.test(account?.walletName || "");
-  const detected = EVM_NETWORKS.filter((n) =>
-    n.nonEvm ? isPhantom && window.phantom?.[n.chainId] : showAll || walletChains.includes(n.chainId)
-  );
-  const others = EVM_NETWORKS.filter((n) => !n.nonEvm && !detected.includes(n));
-  const activeNet = (nonEvm && EVM_NETWORKS.find((n) => n.chainId === nonEvm)) || network;
-  const accountLabel = account ? getLabel(account.address, 0) : "";
+  const restoredRef = useRef(false);
 
+  const network = getNetworkInfo(account?.chainId);
+
+  const isPhantom = /phantom/i.test(
+    account?.walletName || ""
+  );
+
+  const showAll =
+    showAllNets ??
+    /metamask/i.test(account?.walletName || "");
+
+  const detected = EVM_NETWORKS.filter((net) =>
+    net.nonEvm
+      ? isPhantom && Boolean(window.phantom?.[net.chainId])
+      : showAll || walletChains.includes(net.chainId)
+  );
+
+  const others = EVM_NETWORKS.filter(
+    (net) => !net.nonEvm && !detected.includes(net)
+  );
+
+  const activeNet =
+    (nonEvm &&
+      EVM_NETWORKS.find(
+        (net) => net.chainId === nonEvm
+      )) ||
+    network;
+
+  // labelTick forces the renamed label to refresh
+  void labelTick;
+
+  const accountLabel = account
+    ? getLabel(account.address)
+    : "";
+
+  // SAVE ACCOUNT NAME
   function saveAccountLabel() {
     if (!account) return;
+
     const label = draftLabel.trim() || "Account 1";
-    try { localStorage.setItem(labelKey(account.address), label); }
-    catch { setError("Could not save account name in this browser."); }
-    setLabelTick((t) => t + 1);
+
+    try {
+      localStorage.setItem(
+        labelKey(account.address),
+        label
+      );
+    } catch {
+      setError("Could not save account name.");
+    }
+
+    setLabelTick((v) => v + 1);
     setEditingLabel(false);
   }
 
-  // Re-read chain, ALL accounts, balances and wrapped BTC from the wallet.
+  // FETCH EVM WALLET INFORMATION
   async function refreshAccount(injected) {
     if (!injected?.request) return;
+
     const [chainHex, addresses] = await Promise.all([
       injected.request({ method: "eth_chainId" }),
       injected.request({ method: "eth_accounts" }),
     ]);
-    if (selectedWalletRef.current !== injected) return;
-    if (!addresses?.length) { handleDisconnect(); return; }
+
+    if (selectedWalletRef.current !== injected) {
+      return;
+    }
+
+    if (!addresses?.length) {
+      handleDisconnect();
+      return;
+    }
 
     const bp = new BrowserProvider(injected);
     const chainId = Number(chainHex);
     const net = getNetworkInfo(chainId);
 
-    const bal = {};
-    await Promise.all(addresses.map(async (a) => {
-      try { bal[a] = formatEther(await bp.getBalance(a)); } catch { bal[a] = "0"; }
-    }));
+    const nextBalances = {};
 
-    let btcBal = null;
+    await Promise.all(
+      addresses.map(async (address) => {
+        try {
+          nextBalances[address] = formatEther(
+            await bp.getBalance(address)
+          );
+        } catch {
+          nextBalances[address] = "0";
+        }
+      })
+    );
+
+    let btcBalance = null;
+
     if (net.btc) {
       try {
-        const c = new Contract(net.btc.address, ERC20_ABI, bp);
-        btcBal = formatUnits(await c.balanceOf(addresses[0]), net.btc.decimals);
-      } catch { btcBal = "0"; }
+        const contract = new Contract(
+          net.btc.address,
+          ERC20_ABI,
+          bp
+        );
+
+        const rawBalance = await contract.balanceOf(
+          addresses[0]
+        );
+
+        btcBalance = formatUnits(
+          rawBalance,
+          net.btc.decimals
+        );
+      } catch {
+        btcBalance = "0";
+      }
     }
-    if (selectedWalletRef.current !== injected) return;
+
+    if (selectedWalletRef.current !== injected) {
+      return;
+    }
 
     setWalletChains((prev) => {
       if (prev.includes(chainId)) return prev;
+
       const next = [...prev, chainId];
-      saveChains(selectedWalletName.current, next);
+
+      saveChains(
+        selectedWalletName.current,
+        next
+      );
+
       return next;
     });
+
     setAccounts(addresses);
-    setBalances(bal);
-    setBtc(btcBal);
-    setAccount((prev) => prev && {
-      ...prev, provider: bp, injectedProvider: injected,
-      address: addresses[0], chainId, balance: bal[addresses[0]],
-    });
+    setBalances(nextBalances);
+    setBtc(btcBalance);
+
+    setAccount((prev) =>
+      prev
+        ? {
+            ...prev,
+            provider: bp,
+            injectedProvider: injected,
+            address: addresses[0],
+            chainId,
+            balance: nextBalances[addresses[0]],
+          }
+        : prev
+    );
   }
 
-  // Wallet events + light polling so new funds/tokens appear without reload.
+  // RESTORE AN AUTHORIZED EVM WALLET
+  useEffect(() => {
+    if (restoredRef.current) return;
+
+    restoredRef.current = true;
+    let cancelled = false;
+
+    async function restoreWallet() {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem(STORAGE_KEY) || "null"
+        );
+
+        if (!saved) return;
+
+        const wallets = await discoverWallets();
+
+        const wallet =
+          wallets.find((w) => w.id === saved.id) ||
+          wallets.find((w) => w.name === saved.name);
+
+        if (!wallet || cancelled) return;
+
+        const connected = await connectWallet(
+          wallet,
+          { silent: true }
+        );
+
+        if (cancelled) return;
+
+        selectedWalletRef.current = wallet.provider;
+
+        selectedWalletName.current =
+          connected.walletName || wallet.name;
+
+        setWalletIcon(wallet.icon || null);
+        setWalletChains(
+          loadChains(selectedWalletName.current)
+        );
+        setAccount(connected);
+
+        await refreshAccount(wallet.provider);
+      } catch (err) {
+        console.debug(
+          "Silent wallet restore skipped:",
+          err
+        );
+      }
+    }
+
+    restoreWallet();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // EVM ACCOUNT AND NETWORK EVENTS
   useEffect(() => {
     if (!account) return;
+
     const injected = selectedWalletRef.current;
-    if (!injected?.on) return;
 
-    const run = (msg) => refreshAccount(injected).catch((e) => setError(e?.message || msg));
-    const onChain = () => { setNetworkOpen(false); setNonEvm(null); run("Network update failed."); };
-    const onAccounts = (addrs) => { if (!addrs?.length) handleDisconnect(); else run("Account update failed."); };
+    if (!injected) return;
 
-    injected.on("chainChanged", onChain);
-    injected.on("accountsChanged", onAccounts);
-    const timer = setInterval(() => run("Refresh failed."), 12000);
+    const refresh = () => {
+      refreshAccount(injected).catch((err) => {
+        setError(
+          err?.message || "Wallet refresh failed."
+        );
+      });
+    };
+
+    const onChain = () => {
+      setNetworkOpen(false);
+      setNonEvm(null);
+      refresh();
+    };
+
+    const onAccounts = (addresses) => {
+      if (!addresses?.length) {
+        handleDisconnect();
+      } else {
+        refresh();
+      }
+    };
+
+    injected.on?.("chainChanged", onChain);
+    injected.on?.("accountsChanged", onAccounts);
+
+    const timer = setInterval(refresh, 12000);
 
     return () => {
       clearInterval(timer);
-      injected.removeListener?.("chainChanged", onChain);
-      injected.removeListener?.("accountsChanged", onAccounts);
+
+      injected.removeListener?.(
+        "chainChanged",
+        onChain
+      );
+
+      injected.removeListener?.(
+        "accountsChanged",
+        onAccounts
+      );
     };
   }, [account?.injectedProvider, account?.walletName]);
 
-  // Close menus with Escape.
+  // RESET TOKEN SELECTION ON NETWORK CHANGE
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") { setNetworkOpen(false); setWalletMenuOpen(false); } };
+    if (solanaActive) {
+      setFrom("SOL");
+      setTo("USDC");
+    } else {
+      setFrom("ETH");
+      setTo("USDC");
+    }
+
+    setAmount("");
+  }, [solanaActive]);
+
+  // REFRESH SOLANA DEVNET BALANCE
+  useEffect(() => {
+    if (!solanaActive || !otherAddrs.solana) return;
+
+    let alive = true;
+
+    const phantom = window.phantom?.solana;
+
+    async function refreshSolanaBalance() {
+      try {
+        const address =
+          phantom?.publicKey?.toBase58?.() ||
+          otherAddrs.solana;
+
+        const balance = await getSolBalance(address);
+
+        if (!alive) return;
+
+        setOtherAddrs((prev) =>
+          prev.solana === address
+            ? prev
+            : { ...prev, solana: address }
+        );
+
+        setSolBalance(balance);
+      } catch (err) {
+        if (alive) {
+          setSolBalance(null);
+          setError(
+            "Solana Devnet balance: " +
+              (err?.message || "RPC request failed.")
+          );
+        }
+      }
+    }
+
+    function onAccountChanged(publicKey) {
+      if (!publicKey) {
+        setSolBalance(null);
+        setNonEvm(null);
+        setOtherAddrs((prev) => ({
+          ...prev,
+          solana: null,
+        }));
+        return;
+      }
+
+      const address = publicKey.toBase58();
+
+      setOtherAddrs((prev) => ({
+        ...prev,
+        solana: address,
+      }));
+
+      setSolBalance(null);
+    }
+
+    function onDisconnect() {
+      setSolBalance(null);
+      setNonEvm(null);
+      setOtherAddrs((prev) => ({
+        ...prev,
+        solana: null,
+      }));
+    }
+
+    refreshSolanaBalance();
+
+    const timer = setInterval(
+      refreshSolanaBalance,
+      15000
+    );
+
+    phantom?.on?.(
+      "accountChanged",
+      onAccountChanged
+    );
+
+    phantom?.on?.(
+      "disconnect",
+      onDisconnect
+    );
+
+    return () => {
+      alive = false;
+      clearInterval(timer);
+
+      phantom?.off?.(
+        "accountChanged",
+        onAccountChanged
+      );
+
+      phantom?.off?.(
+        "disconnect",
+        onDisconnect
+      );
+    };
+  }, [solanaActive, otherAddrs.solana]);
+
+  // CLOSE MENUS
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        setNetworkOpen(false);
+        setWalletMenuOpen(false);
+        setWalletModal(false);
+      }
+    };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+
+    return () =>
+      window.removeEventListener("keydown", onKey);
   }, []);
 
+  // OPEN WALLET SELECTION
   async function handleConnect() {
-    setError(""); setConnecting(true);
+    setError("");
+    setConnecting(true);
+
     try {
       const wallets = await discoverWallets();
+
       setWalletOptions(wallets);
       setWalletModal(true);
-      if (!wallets.length) setError("No compatible wallet found. Enable MetaMask, Trust Wallet, or Phantom.");
-    } catch (err) {
-      setError(err?.message || "Wallet detection failed.");
-    } finally { setConnecting(false); }
-  }
 
-  async function handleSelectWallet(wallet) {
-    setConnecting(true); setError("");
-    try {
-      const connected = await connectWallet(wallet);
-      selectedWalletRef.current = wallet.provider;
-      const hit = announced.find((a) => a.provider === wallet.provider || a.info.name === wallet.name);
-      setWalletIcon(wallet.icon || hit?.info?.icon || null);
-      selectedWalletName.current = connected.walletName || wallet.name;
-      setWalletChains(loadChains(selectedWalletName.current));
-      setShowMore(false);
-      setAccount(connected);
-      setWalletModal(false); setNetworkOpen(false); setWalletMenuOpen(false);
-      await refreshAccount(wallet.provider);
-    } catch (err) {
-      setError(err?.message || "Failed to connect wallet.");
-    } finally { setConnecting(false); }
-  }
-
-  function handleDisconnect() {
-    selectedWalletRef.current = null;
-    setAccount(null); setNonEvm(null); setOtherAddrs({}); setWalletChains([]); setAccounts([]); setBalances({}); setBtc(null);
-    setWalletIcon(null); setDraftLabel("");
-    setWalletMenuOpen(false); setNetworkOpen(false);
-    setEditingLabel(false); setCopyMessage(""); setError("");
-  }
-
-  // Bitcoin / Solana through Phantom's own providers (shows logo + address; swaps stay on Sepolia).
-  async function connectNonEvm(item) {
-    setNetworkOpen(false); setConnecting(true); setError("");
-    try {
-      const p = window.phantom?.[item.chainId];
-      if (!p) throw new Error(`${item.name} needs the Phantom wallet.`);
-      let address;
-      if (item.chainId === "bitcoin") {
-        const accts = await p.requestAccounts();
-        address = (accts.find((a) => a.purpose === "payment") || accts[0])?.address;
-      } else {
-        const res = await p.connect();
-        address = (res?.publicKey || p.publicKey)?.toString();
+      if (!wallets.length) {
+        setError(
+          "No supported wallet extension found."
+        );
       }
-      if (!address) throw new Error("No address returned by the wallet.");
-      setOtherAddrs((prev) => ({ ...prev, [item.chainId]: address }));
-      setNonEvm(item.chainId);
     } catch (err) {
-      if (err?.code !== 4001) setError(err?.message || `Could not connect ${item.name}.`);
-    } finally { setConnecting(false); }
-  }
-
-  async function chooseNetwork(selected) {
-    if (!account) { setError("Connect your wallet first."); return; }
-    if (selected.nonEvm) { await connectNonEvm(selected); return; }
-    setNetworkOpen(false); setConnecting(true); setError("");
-    try {
-      const injected = selectedWalletRef.current;
-      if (!injected) throw new Error("Wallet provider unavailable.");
-      await switchEvmNetwork(injected, selected);
-      setNonEvm(null);
-      await refreshAccount(injected);
-    } catch (err) {
-      setError(err?.message || "Could not switch network.");
-    } finally { setConnecting(false); }
-  }
-
-  // Opens the wallet's own account picker so the user can allow more accounts / change the active one.
-  async function manageAccounts() {
-    const injected = selectedWalletRef.current;
-    if (!injected) return;
-    try {
-      await injected.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
-      await refreshAccount(injected);
-    } catch (err) {
-      if (err?.code !== 4001) setError(err?.message || "Could not open account picker.");
+      setError(
+        err?.message || "Wallet detection failed."
+      );
+    } finally {
+      setConnecting(false);
     }
   }
 
+  // CONNECT SELECTED EVM WALLET
+  async function handleSelectWallet(wallet) {
+    setConnecting(true);
+    setError("");
+
+    try {
+      const connected = await connectWallet(wallet);
+
+      selectedWalletRef.current = wallet.provider;
+
+      selectedWalletName.current =
+        connected.walletName || wallet.name;
+
+      setWalletIcon(wallet.icon || null);
+
+      setWalletChains(
+        loadChains(selectedWalletName.current)
+      );
+
+      setAccount(connected);
+      setNonEvm(null);
+      setWalletModal(false);
+      setNetworkOpen(false);
+      setWalletMenuOpen(false);
+      setShowMore(false);
+
+      try {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            id: wallet.id,
+            name: wallet.name,
+          })
+        );
+      } catch {
+        // Storage optional
+      }
+
+      await refreshAccount(wallet.provider);
+    } catch (err) {
+      setError(
+        err?.message || "Failed to connect wallet."
+      );
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  // DISCONNECT FROM MINSWAP
+  function handleDisconnect() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Ignore unavailable storage
+    }
+
+    selectedWalletRef.current = null;
+    selectedWalletName.current = "";
+
+    setAccount(null);
+    setAccounts([]);
+    setBalances({});
+    setBtc(null);
+
+    setNonEvm(null);
+    setOtherAddrs({});
+    setSolBalance(null);
+
+    setWalletChains([]);
+    setWalletIcon(null);
+    setWalletMenuOpen(false);
+    setNetworkOpen(false);
+    setEditingLabel(false);
+    setDraftLabel("");
+    setCopyMessage("");
+    setError("");
+  }
+
+  // CONNECT PHANTOM SOLANA OR BITCOIN
+  async function connectNonEvm(item) {
+    setNetworkOpen(false);
+    setConnecting(true);
+    setError("");
+
+    try {
+      let address;
+
+      if (item.chainId === "bitcoin") {
+        const provider = window.phantom?.bitcoin;
+
+        if (!provider) {
+          throw new Error(
+            "Bitcoin requires Phantom wallet."
+          );
+        }
+
+        const btcAccounts =
+          await provider.requestAccounts();
+
+        address = (
+          btcAccounts.find(
+            (a) => a.purpose === "payment"
+          ) || btcAccounts[0]
+        )?.address;
+      } else if (item.chainId === "solana") {
+        const connected =
+          await connectPhantomSolana();
+
+        address = connected.address;
+
+        setSolBalance(connected.balance);
+
+        console.log(
+          "Solana Devnet address:",
+          address
+        );
+
+        console.log(
+          "Solana Devnet balance:",
+          connected.balance
+        );
+      } else {
+        throw new Error(
+          "Unsupported non-EVM network."
+        );
+      }
+
+      if (!address) {
+        throw new Error(
+          "Wallet did not return an address."
+        );
+      }
+
+      setOtherAddrs((prev) => ({
+        ...prev,
+        [item.chainId]: address,
+      }));
+
+      setNonEvm(item.chainId);
+    } catch (err) {
+      if (err?.code !== 4001) {
+        setError(
+          err?.message ||
+            `Could not connect ${item.name}.`
+        );
+      }
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  // SELECT NETWORK
+  async function chooseNetwork(selected) {
+    if (!account) {
+      setError("Connect your wallet first.");
+      return;
+    }
+
+    if (selected.nonEvm) {
+      await connectNonEvm(selected);
+      return;
+    }
+
+    setNetworkOpen(false);
+    setConnecting(true);
+    setError("");
+
+    try {
+      const injected = selectedWalletRef.current;
+
+      if (!injected) {
+        throw new Error(
+          "Wallet provider unavailable."
+        );
+      }
+
+      await switchEvmNetwork(
+        injected,
+        selected
+      );
+
+      setNonEvm(null);
+
+      await refreshAccount(injected);
+    } catch (err) {
+      setError(
+        err?.message || "Could not switch network."
+      );
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  // ACCOUNT PERMISSION PICKER
+  async function manageAccounts() {
+    const injected = selectedWalletRef.current;
+
+    if (!injected) return;
+
+    try {
+      await injected.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }],
+      });
+
+      await refreshAccount(injected);
+    } catch (err) {
+      if (err?.code !== 4001) {
+        setError(
+          err?.message || "Account selection failed."
+        );
+      }
+    }
+  }
+
+  // COPY ADDRESS
   async function copyAddress(address) {
     try {
       await navigator.clipboard.writeText(address);
       setCopyMessage("Address copied!");
-    } catch { setCopyMessage("Unable to copy address."); }
-    setTimeout(() => setCopyMessage(""), 1800);
-  }
-
-  async function handleSwap() {
-    if (!account) { await handleConnect(); return; }
-    if (nonEvm) { setError("Swaps work on Sepolia only. Bitcoin and Solana show your logo and address."); return; }
-    if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
-      setError("Enter a valid swap amount."); return;
+    } catch {
+      setCopyMessage("Unable to copy address.");
     }
-    setError(""); setConnecting(true);
-    try {
-      if (account.chainId !== NETWORK.chainId) throw new Error("Your SwapPool is configured on Sepolia only. Switch to Sepolia.");
-      if (from === "ETH" || to === "ETH") throw new Error("Native ETH swaps are not supported by this ERC-20 SwapPool.");
-      const receipt = await executeSwap(account, amount, true);
-      console.log("Swap transaction:", receipt);
-      setAmount("");
-    } catch (err) {
-      setError(err?.shortMessage || err?.message || "Swap failed.");
-    } finally { setConnecting(false); }
+
+    setTimeout(
+      () => setCopyMessage(""),
+      1800
+    );
   }
 
-  function swapTokens() { setFrom(to); setTo(from); }
+  // SWAP
+  async function handleSwap() {
+    if (!account) {
+      await handleConnect();
+      return;
+    }
+
+    if (nonEvm) {
+      setError(
+        "Solana and Bitcoin swaps are not implemented yet."
+      );
+      return;
+    }
+
+    if (
+      !amount ||
+      !Number.isFinite(Number(amount)) ||
+      Number(amount) <= 0
+    ) {
+      setError("Enter a valid swap amount.");
+      return;
+    }
+
+    setError("");
+    setConnecting(true);
+
+    try {
+      if (account.chainId !== NETWORK.chainId) {
+        throw new Error(
+          "SwapPool currently supports Sepolia only."
+        );
+      }
+
+      if (from === "ETH" || to === "ETH") {
+        throw new Error(
+          "Native ETH is not supported by this ERC-20 pool."
+        );
+      }
+
+      // Direction must match deployed token addresses.
+      const aToB =
+        from === "USDC" && to === "USDT";
+
+      const bToA =
+        from === "USDT" && to === "USDC";
+
+      if (!aToB && !bToA) {
+        throw new Error(
+          "Unsupported token pair."
+        );
+      }
+
+      // Verify contract tokenA = USDC and tokenB = USDT
+      // before submitting a real transaction.
+      throw new Error(
+        "Verify deployed tokenA/tokenB addresses and liquidity before enabling swaps."
+      );
+
+      // After verification, replace the throw above with:
+      // const receipt = await executeSwap(
+      //   account,
+      //   amount,
+      //   aToB
+      // );
+      // console.log(receipt);
+      // setAmount("");
+    } catch (err) {
+      setError(
+        err?.shortMessage ||
+          err?.message ||
+          "Swap failed."
+      );
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  function swapTokens() {
+    if (solanaActive) return;
+
+    setFrom(to);
+    setTo(from);
+  }
 
   return (
     <div className="app">
-      {/* ================= NAVBAR ================= */}
+      {/* NAVBAR */}
       <header className="header">
         <div className="brand">
-          <img src="/assets/minswap-logo.svg" alt="MinSwap" />
+          <img
+            src="/assets/minswap-logo.svg"
+            alt="MinSwap"
+          />
           <span>MinSwap</span>
         </div>
 
         <nav>
-          <button className="nav-active">Swap</button>
+          <button className="nav-active">
+            Swap
+          </button>
           <button>Liquidity</button>
           <button>Earn</button>
         </nav>
 
         <div className="header-actions">
-          {/* NETWORK BUTTON */}
+          {/* NETWORK MENU */}
           <div className="network-menu-wrap">
             <button
               className="network-trigger"
               disabled={connecting}
               aria-expanded={networkOpen}
-              onClick={() => { setWalletMenuOpen(false); setNetworkOpen((p) => !p); }}
+              onClick={() => {
+                setWalletMenuOpen(false);
+                setNetworkOpen((p) => !p);
+              }}
             >
               <NetIcon net={activeNet} />
-              <span className="network-trigger-text">{account ? activeNet.name : "Network"}</span>
+
+              <span className="network-trigger-text">
+                {account
+                  ? activeNet?.name || "Network"
+                  : "Network"}
+              </span>
+
               <Chevron open={networkOpen} />
             </button>
 
             {networkOpen && (
               <>
-                <button className="menu-dismiss" aria-label="Close network menu" onClick={() => setNetworkOpen(false)} />
+                <button
+                  className="menu-dismiss"
+                  aria-label="Close network menu"
+                  onClick={() => setNetworkOpen(false)}
+                />
+
                 <div className="network-dropdown">
-                  <div className="dropdown-heading">Select network</div>
-                  <p>Choose a network for your wallet.</p>
+                  <div className="dropdown-heading">
+                    Select network
+                  </div>
+
+                  <p>
+                    Choose a network for your wallet.
+                  </p>
 
                   {account && (
                     <div className="wallet-chip">
-                      <WalletLogo icon={walletIcon} name={account.walletName} size={22} />
-                      <span>Networks in <strong>{account.walletName}</strong></span>
+                      <WalletLogo
+                        icon={walletIcon}
+                        name={account.walletName}
+                        size={22}
+                      />
+
+                      <span>
+                        Networks in{" "}
+                        <strong>
+                          {account.walletName}
+                        </strong>
+                      </span>
                     </div>
                   )}
 
                   {detected.map((item) => (
-                    <button key={item.chainId} className="network-row" disabled={connecting} onClick={() => chooseNetwork(item)}>
+                    <button
+                      key={item.chainId}
+                      className="network-row"
+                      disabled={connecting}
+                      onClick={() => chooseNetwork(item)}
+                    >
                       <NetIcon net={item} />
+
                       <span className="network-description">
-                        <strong>{item.name}{item.testnet && <span className="testnet-tag">TESTNET</span>}</strong>
-                        <small title={item.nonEvm ? otherAddrs[item.chainId] : account?.address}>
+                        <strong>
+                          {item.name}
+                          {item.testnet && (
+                            <span className="testnet-tag">
+                              TESTNET
+                            </span>
+                          )}
+                        </strong>
+
+                        <small>
                           {item.nonEvm
-                            ? (otherAddrs[item.chainId] ? shortAddress(otherAddrs[item.chainId]) : "Tap to show address")
-                            : shortAddress(account.address)}
+                            ? otherAddrs[item.chainId]
+                              ? shortAddress(
+                                  otherAddrs[item.chainId]
+                                )
+                              : "Tap to connect"
+                            : shortAddress(
+                                account?.address
+                              )}
                         </small>
                       </span>
-                      {(item.nonEvm ? nonEvm === item.chainId : !nonEvm && account?.chainId === item.chainId) && <span className="active-check">✓</span>}
+
+                      {(item.nonEvm
+                        ? nonEvm === item.chainId
+                        : !nonEvm &&
+                          account?.chainId ===
+                            item.chainId) && (
+                        <span className="active-check">
+                          ✓
+                        </span>
+                      )}
                     </button>
                   ))}
-                  {account && !detected.some((n) => n.chainId === account.chainId) && (
-                    <div className="network-menu-note">Current network (chain {account.chainId}) is not in MinSwap's list.</div>
-                  )}
-                  {!account && <div className="network-menu-note">Connect a wallet to see its networks.</div>}
 
                   {account && (
-                    <button className="mini-btn more-btn" onClick={() => setShowAllNets(!showAll)}>
-                      {showAll ? "Show only networks used in this wallet" : "Show all supported networks"}
+                    <button
+                      className="mini-btn more-btn"
+                      onClick={() =>
+                        setShowAllNets(!showAll)
+                      }
+                    >
+                      {showAll
+                        ? "Show used networks"
+                        : "Show all supported networks"}
                     </button>
                   )}
 
                   {account && others.length > 0 && (
                     <>
-                      <button className="mini-btn more-btn" onClick={() => setShowMore((v) => !v)}>
-                        {showMore ? "Hide other networks" : "Request another network"}
+                      <button
+                        className="mini-btn more-btn"
+                        onClick={() =>
+                          setShowMore((p) => !p)
+                        }
+                      >
+                        {showMore
+                          ? "Hide other networks"
+                          : "Request another network"}
                       </button>
-                      {showMore && others.map((item) => (
-                        <button key={item.chainId} className="network-row" disabled={connecting} onClick={() => chooseNetwork(item)}>
-                          <NetIcon net={item} />
-                          <span className="network-description"><strong>{item.name}</strong><small>Ask {account.walletName} to switch</small></span>
-                        </button>
-                      ))}
+
+                      {showMore &&
+                        others.map((item) => (
+                          <button
+                            key={item.chainId}
+                            className="network-row"
+                            disabled={connecting}
+                            onClick={() =>
+                              chooseNetwork(item)
+                            }
+                          >
+                            <NetIcon net={item} />
+
+                            <span className="network-description">
+                              <strong>
+                                {item.name}
+                              </strong>
+
+                              <small>
+                                Request wallet network switch
+                              </small>
+                            </span>
+                          </button>
+                        ))}
                     </>
                   )}
 
                   <div className="network-menu-note">
-                    Only networks your wallet has been on are listed. Switch network inside your wallet and it appears here automatically.
+                    Network support depends on your
+                    connected wallet.
                   </div>
                 </div>
               </>
             )}
           </div>
 
-          {/* WALLET ACCOUNT BUTTON */}
+          {/* ACCOUNT BUTTON */}
           <div className="wallet-menu-wrap">
             <button
               className="connect"
               disabled={connecting}
-              aria-expanded={account ? walletMenuOpen : undefined}
-              onClick={account ? () => { setNetworkOpen(false); setWalletMenuOpen((p) => !p); } : handleConnect}
+              aria-expanded={
+                account ? walletMenuOpen : undefined
+              }
+              onClick={
+                account
+                  ? () => {
+                      setNetworkOpen(false);
+                      setWalletMenuOpen((p) => !p);
+                    }
+                  : handleConnect
+              }
             >
-              {account && <WalletLogo icon={walletIcon} name={account.walletName} />}
+              {account && (
+                <WalletLogo
+                  icon={walletIcon}
+                  name={account.walletName}
+                />
+              )}
+
               <span className="connect-label">
-                {connecting ? "Connecting..." : account ? accountLabel : "Connect Wallet"}
+                {connecting
+                  ? "Connecting..."
+                  : account
+                    ? accountLabel
+                    : "Connect Wallet"}
               </span>
-              {account && <Chevron open={walletMenuOpen} />}
+
+              {account && (
+                <Chevron open={walletMenuOpen} />
+              )}
             </button>
 
             {account && walletMenuOpen && (
               <>
-                <button className="menu-dismiss" aria-label="Close account menu" onClick={() => setWalletMenuOpen(false)} />
+                <button
+                  className="menu-dismiss"
+                  aria-label="Close account menu"
+                  onClick={() =>
+                    setWalletMenuOpen(false)
+                  }
+                />
+
                 <div className="wallet-profile-menu">
-                  <span className="dropdown-heading">Connected accounts ({accounts.length})</span>
+                  <span className="dropdown-heading">
+                    Connected accounts ({accounts.length})
+                  </span>
 
                   <div className="wallet-identity-row">
-                    <WalletLogo icon={walletIcon} name={account.walletName} size={32} />
+                    <WalletLogo
+                      icon={walletIcon}
+                      name={account.walletName}
+                      size={32}
+                    />
+
                     <div>
-                      <strong>{account.walletName}</strong>
-                      <small>{activeNet.name}</small>
+                      <strong>
+                        {account.walletName}
+                      </strong>
+                      <small>
+                        {activeNet?.name}
+                      </small>
                     </div>
                   </div>
 
                   <div className="acct-list">
                     {accounts.map((addr, i) => (
-                      <div key={addr} className={`acct-row ${i === 0 ? "active" : ""}`}>
-                        <span className="identicon">◈</span>
+                      <div
+                        key={addr}
+                        className={`acct-row ${
+                          i === 0 ? "active" : ""
+                        }`}
+                      >
+                        <span className="identicon">
+                          ◈
+                        </span>
+
                         <div className="acct-main">
-                          <strong>{getLabel(addr, i)} {i === 0 && <span className="acct-badge">ACTIVE</span>}</strong>
-                          <span title={addr}>{addr}</span>
-                          <em>{Number(balances[addr] ?? 0).toFixed(5)} {network.currency}</em>
+                          <strong>
+                            {getLabel(addr, i)}
+                            {i === 0 && (
+                              <span className="acct-badge">
+                                ACTIVE
+                              </span>
+                            )}
+                          </strong>
+
+                          <span title={addr}>
+                            {addr}
+                          </span>
+
+                          <em>
+                            {Number(
+                              balances[addr] ?? 0
+                            ).toFixed(5)}{" "}
+                            {network.currency}
+                          </em>
                         </div>
-                        <button className="mini-btn" onClick={() => copyAddress(addr)}>Copy</button>
+
+                        <button
+                          className="mini-btn"
+                          onClick={() =>
+                            copyAddress(addr)
+                          }
+                        >
+                          Copy
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -461,53 +1276,148 @@ export default function App() {
                   {nonEvm && otherAddrs[nonEvm] && (
                     <div className="acct-row active">
                       <NetIcon net={activeNet} />
+
                       <div className="acct-main">
-                        <strong>{activeNet.name} address</strong>
-                        <span title={otherAddrs[nonEvm]}>{otherAddrs[nonEvm]}</span>
+                        <strong>
+                          {solanaActive
+                            ? "Solana Devnet address"
+                            : `${activeNet.name} address`}
+                        </strong>
+
+                        <span
+                          title={otherAddrs[nonEvm]}
+                        >
+                          {otherAddrs[nonEvm]}
+                        </span>
+
+                        {solanaActive && (
+                          <em>
+                            {solBalance === null
+                              ? "Loading SOL..."
+                              : `${solBalance.toFixed(5)} SOL`}
+                          </em>
+                        )}
                       </div>
-                      <button className="mini-btn" onClick={() => copyAddress(otherAddrs[nonEvm])}>Copy</button>
+
+                      <button
+                        className="mini-btn"
+                        onClick={() =>
+                          copyAddress(
+                            otherAddrs[nonEvm]
+                          )
+                        }
+                      >
+                        Copy
+                      </button>
                     </div>
                   )}
 
-                  <button className="account-action" onClick={manageAccounts}>
-                    Add / switch accounts in wallet
+                  <button
+                    className="account-action"
+                    onClick={manageAccounts}
+                  >
+                    Add / switch EVM accounts
                   </button>
 
-                  {/* RENAME ACTIVE ACCOUNT */}
                   <div className="account-label-row">
                     {editingLabel ? (
                       <input
-                        className="account-label-input" value={draftLabel} maxLength={26} placeholder="Account name"
-                        onChange={(e) => setDraftLabel(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") saveAccountLabel(); if (e.key === "Escape") setEditingLabel(false); }}
+                        className="account-label-input"
+                        value={draftLabel}
+                        maxLength={26}
+                        placeholder="Account name"
+                        onChange={(e) =>
+                          setDraftLabel(e.target.value)
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            saveAccountLabel();
+                          }
+                          if (e.key === "Escape") {
+                            setEditingLabel(false);
+                          }
+                        }}
                       />
-                    ) : (<strong>{accountLabel}</strong>)}
-                    <button onClick={() => { if (editingLabel) saveAccountLabel(); else { setDraftLabel(accountLabel); setEditingLabel(true); } }}>
-                      {editingLabel ? "Save" : "Rename active"}
+                    ) : (
+                      <strong>{accountLabel}</strong>
+                    )}
+
+                    <button
+                      onClick={() => {
+                        if (editingLabel) {
+                          saveAccountLabel();
+                        } else {
+                          setDraftLabel(accountLabel);
+                          setEditingLabel(true);
+                        }
+                      }}
+                    >
+                      {editingLabel
+                        ? "Save"
+                        : "Rename active"}
                     </button>
                   </div>
 
-                  {/* ASSETS OF ACTIVE ACCOUNT */}
                   <div className="account-address-box">
-                    <span className="address-caption">Assets on {network.name}</span>
+                    <span className="address-caption">
+                      Assets on{" "}
+                      {solanaActive
+                        ? "Solana Devnet"
+                        : network.name}
+                    </span>
+
                     <div className="asset-row">
-                      <span>{network.currency || "Native"}</span>
-                      <span>{Number(account.balance || 0).toFixed(5)}</span>
+                      <span>
+                        {solanaActive
+                          ? "SOL"
+                          : network.currency || "Native"}
+                      </span>
+
+                      <span>
+                        {solanaActive
+                          ? solBalance === null
+                            ? "—"
+                            : solBalance.toFixed(5)
+                          : Number(
+                              account.balance || 0
+                            ).toFixed(5)}
+                      </span>
                     </div>
-                    {network.btc ? (
-                      <div className="asset-row">
-                        <span>{network.btc.symbol} (Bitcoin)</span>
-                        <span>{Number(btc || 0).toFixed(6)}</span>
-                      </div>
-                    ) : (
-                      <small>No wrapped BTC is tracked on this network.</small>
-                    )}
+
+                    {!solanaActive &&
+                      (network.btc ? (
+                        <div className="asset-row">
+                          <span>
+                            {network.btc.symbol}
+                          </span>
+                          <span>
+                            {Number(
+                              btc || 0
+                            ).toFixed(6)}
+                          </span>
+                        </div>
+                      ) : (
+                        <small>
+                          No wrapped BTC is tracked
+                          on this network.
+                        </small>
+                      ))}
                   </div>
 
-                  {copyMessage && <small>{copyMessage}</small>}
-                  <small className="account-help">Account names are saved locally in this browser. Balances refresh automatically.</small>
+                  {copyMessage && (
+                    <small>{copyMessage}</small>
+                  )}
 
-                  <button className="disconnect-option" onClick={handleDisconnect}>Disconnect from MinSwap</button>
+                  <small className="account-help">
+                    Balances refresh automatically.
+                  </small>
+
+                  <button
+                    className="disconnect-option"
+                    onClick={handleDisconnect}
+                  >
+                    Disconnect from MinSwap
+                  </button>
                 </div>
               </>
             )}
@@ -515,32 +1425,77 @@ export default function App() {
         </div>
       </header>
 
-      {/* ================= WALLET MODAL ================= */}
+      {/* WALLET MODAL */}
       {walletModal && (
-        <div className="wallet-overlay" onClick={() => { if (!connecting) setWalletModal(false); }}>
-          <div className="wallet-dialog" role="dialog" aria-modal="true" aria-label="Select wallet" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="wallet-overlay"
+          onClick={() => {
+            if (!connecting) setWalletModal(false);
+          }}
+        >
+          <div
+            className="wallet-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Select wallet"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="wallet-dialog-header">
               <h2>Connect a wallet</h2>
-              <button aria-label="Close" disabled={connecting} onClick={() => setWalletModal(false)}>✕</button>
+
+              <button
+                disabled={connecting}
+                onClick={() =>
+                  setWalletModal(false)
+                }
+              >
+                ✕
+              </button>
             </div>
-            <p>Select the wallet extension you want to connect.</p>
+
+            <p>
+              Select a wallet extension to connect.
+            </p>
+
             {walletOptions.map((wallet) => (
-              <button key={wallet.id} className="wallet-option" disabled={connecting} onClick={() => handleSelectWallet(wallet)}>
-                <WalletLogo icon={wallet.icon} name={wallet.name} size={32} />
+              <button
+                key={wallet.id}
+                className="wallet-option"
+                disabled={connecting}
+                onClick={() =>
+                  handleSelectWallet(wallet)
+                }
+              >
+                <WalletLogo
+                  icon={wallet.icon}
+                  name={wallet.name}
+                  size={32}
+                />
+
                 <span>{wallet.name}</span>
                 <span>→</span>
               </button>
             ))}
-            {!walletOptions.length && <p>No compatible browser wallets detected.</p>}
-            {error && <div className="error" role="alert">{error}</div>}
+
+            {!walletOptions.length && (
+              <p>No browser wallets detected.</p>
+            )}
+
+            {error && (
+              <div className="error" role="alert">
+                {error}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* ================= SWAP PAGE ================= */}
+      {/* SWAP PAGE */}
       <main className="main">
         <div className="page-tabs">
-          <button className="active">Swap</button>
+          <button className="active">
+            Swap
+          </button>
           <button>Limit</button>
         </div>
 
@@ -548,64 +1503,205 @@ export default function App() {
           <div className="card-top">
             <div>
               <h1>Swap</h1>
-              <p>Trade tokens instantly with our decentralized exchange.</p>
+              <p>
+                Trade tokens instantly with our
+                decentralized exchange.
+              </p>
             </div>
-            <button className="gear">⚙</button>
+
+            <button className="gear">
+              ⚙
+            </button>
           </div>
 
+          {/* YOU PAY */}
           <div className="field">
             <div className="field-label">
               <span>You pay</span>
-              <span>Balance: {account ? Number(account.balance).toFixed(4) : "—"}</span>
+
+              <span>
+                Balance:{" "}
+                {solanaActive
+                  ? solBalance === null
+                    ? "Loading..."
+                    : `${solBalance.toFixed(4)} SOL`
+                  : account
+                    ? Number(
+                        account.balance || 0
+                      ).toFixed(4)
+                    : "—"}
+              </span>
             </div>
+
             <div className="amount-row">
-              <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.0" inputMode="decimal" />
-              <TokenSelect value={from} onChange={setFrom} exclude={to} />
+              <input
+                value={amount}
+                onChange={(e) =>
+                  setAmount(e.target.value)
+                }
+                placeholder="0.0"
+                inputMode="decimal"
+              />
+
+              <TokenSelect
+                value={from}
+                onChange={setFrom}
+                exclude={to}
+                solanaActive={solanaActive}
+              />
             </div>
           </div>
 
-          <button className="switch" onClick={swapTokens}>↕</button>
+          {/* SWITCH TOKEN */}
+          <button
+            className="switch"
+            onClick={swapTokens}
+            disabled={solanaActive}
+          >
+            ↕
+          </button>
 
+          {/* YOU RECEIVE */}
           <div className="field">
-            <div className="field-label"><span>You receive</span><span>Balance: —</span></div>
+            <div className="field-label">
+              <span>You receive</span>
+              <span>Balance: —</span>
+            </div>
+
             <div className="amount-row">
-              <input readOnly placeholder="0.0" value={amount && Number.isFinite(Number(amount)) ? (Number(amount) * 1.98).toFixed(4) : ""} />
-              <TokenSelect value={to} onChange={setTo} exclude={from} />
+              <input
+                readOnly
+                placeholder="0.0"
+                value={
+                  solanaActive
+                    ? ""
+                    : amount &&
+                        Number.isFinite(
+                          Number(amount)
+                        )
+                      ? (
+                          Number(amount) * 1.98
+                        ).toFixed(4)
+                      : ""
+                }
+              />
+
+              <TokenSelect
+                value={to}
+                onChange={setTo}
+                exclude={from}
+                solanaActive={solanaActive}
+                receive
+              />
             </div>
           </div>
 
+          {/* SWAP DETAILS */}
           <div className="details">
-            <div><span>Rate (demo only)</span><span>1 {from} ≈ 1.98 {to}</span></div>
-            <div><span>Minimum received</span><span>—</span></div>
-            <div><span>Price impact</span><span>—</span></div>
+            <div>
+              <span>
+                Rate (demo only)
+              </span>
+              <span>
+                {solanaActive
+                  ? "Solana quote unavailable"
+                  : `1 ${from} ≈ 1.98 ${to}`}
+              </span>
+            </div>
+
+            <div>
+              <span>Minimum received</span>
+              <span>—</span>
+            </div>
+
+            <div>
+              <span>Price impact</span>
+              <span>—</span>
+            </div>
+
             <div>
               <span>Slippage tolerance</span>
-              <select value={slippage} onChange={(e) => setSlippage(e.target.value)}>
-                <option value="0.1">0.1%</option>
-                <option value="0.5">0.5%</option>
-                <option value="1.0">1.0%</option>
+
+              <select
+                value={slippage}
+                onChange={(e) =>
+                  setSlippage(e.target.value)
+                }
+              >
+                <option value="0.1">
+                  0.1%
+                </option>
+                <option value="0.5">
+                  0.5%
+                </option>
+                <option value="1.0">
+                  1.0%
+                </option>
               </select>
             </div>
           </div>
 
-          {error && <div className="error" role="alert">{error}</div>}
+          {solanaActive && (
+            <p className="notice">
+              Solana Devnet wallet connected.
+              Solana swaps are not implemented yet.
+            </p>
+          )}
 
-          <button className="swap-button" disabled={connecting} onClick={handleSwap}>
-            {connecting ? "Processing..." : account ? "Swap" : "Connect Wallet"}
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+
+          {/* SWAP BUTTON */}
+          <button
+            className="swap-button"
+            disabled={
+              connecting || solanaActive
+            }
+            onClick={handleSwap}
+          >
+            {connecting
+              ? "Processing..."
+              : solanaActive
+                ? "Solana Swap Coming Soon"
+                : account
+                  ? "Swap"
+                  : "Connect Wallet"}
           </button>
 
+          {/* ACTIVE NETWORK */}
           <div className="network">
             <span className="dot" />
-            {account ? `${activeNet.name} • ${shortAddress(nonEvm ? otherAddrs[nonEvm] : account.address)}` : "Connect wallet to select a network"}
+
+            {account
+              ? `${
+                  solanaActive
+                    ? "Solana Devnet"
+                    : activeNet?.name || "Network"
+                } • ${shortAddress(
+                  nonEvm
+                    ? otherAddrs[nonEvm]
+                    : account.address
+                )}`
+              : "Connect wallet to select a network"}
           </div>
         </section>
 
-        <p className="notice">Demo quote only. Swaps require verified token contracts and supported liquidity.</p>
+        <p className="notice">
+          Demo quote only. Real swaps require
+          verified contracts, prices and liquidity.
+        </p>
       </main>
 
+      {/* FOOTER */}
       <footer>
         <span>MinSwap Web3</span>
-        <span>Multi-wallet • EIP-6963 • ethers.js</span>
+
+        <span>
+          Multi-wallet • Solana Devnet • ethers.js
+        </span>
       </footer>
     </div>
   );
